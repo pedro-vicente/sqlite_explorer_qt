@@ -1,0 +1,562 @@
+//Copyright (C) 2016 Pedro Vicente
+//GNU General Public License (GPL) Version 3 described in the LICENSE file 
+
+#include <QApplication>
+#include <QMetaType>
+#include <cassert>
+#include <vector>
+#include <algorithm>
+#include "sqlite_explorer.hh"
+
+const QString app_name("SQLite Explorer");
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//main
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+int main(int argc, char *argv[])
+{
+  Q_INIT_RESOURCE(sqlite_explorer);
+  QApplication app(argc, argv);
+  QCoreApplication::setApplicationVersion("1.0");
+  QCoreApplication::setApplicationName(app_name);
+  QCommandLineParser parser;
+  parser.addHelpOption();
+  parser.addVersionOption();
+  parser.addPositionalArgument("file", "The file to open.");
+  parser.process(app);
+  const QStringList args = parser.positionalArguments();
+
+  MainWindow window;
+  if(args.size())
+  {
+    QString file_name = args.at(0);
+    window.read_file(file_name);
+  }
+  window.showMaximized();
+  return app.exec();
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//ItemData
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+class ItemData
+{
+public:
+
+  ItemData(const std::string& file_name, const std::string& item_nm) :
+    m_file_name(file_name),
+    m_item_nm(item_nm)
+  {
+  }
+  ~ItemData()
+  {
+
+  }
+  std::string m_file_name;
+  std::string m_item_nm;
+};
+
+Q_DECLARE_METATYPE(ItemData*);
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//get_item_data
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+ItemData* get_item_data(QTreeWidgetItem *item)
+{
+  QVariant data = item->data(0, Qt::UserRole);
+  ItemData *item_data = data.value<ItemData*>();
+  return item_data;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::MainWindow
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+MainWindow::MainWindow()
+{
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //mdi area
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  m_mdi_area = new QMdiArea;
+  setCentralWidget(m_mdi_area);
+
+  setWindowTitle(app_name);
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //status bar
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  statusBar()->showMessage(tr("Ready"));
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //dock for tree
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  m_tree_dock = new QDockWidget(this);
+  m_tree_dock->setFeatures(QDockWidget::NoDockWidgetFeatures);
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //browser tree
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  m_tree = new FileTreeWidget();
+  m_tree->setHeaderHidden(1);
+  m_tree->set_main_window(this);
+  //add dock
+  m_tree_dock->setWidget(m_tree);
+  addDockWidget(Qt::LeftDockWidgetArea, m_tree_dock);
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //actions
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //open
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  m_action_open = new QAction(tr("&Open..."), this);
+  m_action_open->setIcon(QIcon(":/images/open.png"));
+  m_action_open->setShortcut(QKeySequence::Open);
+  m_action_open->setStatusTip(tr("Open a file"));
+  connect(m_action_open, SIGNAL(triggered()), this, SLOT(open_file()));
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //exit
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  m_action_exit = new QAction(tr("E&xit"), this);
+  m_action_exit->setShortcut(tr("Ctrl+Q"));
+  m_action_exit->setStatusTip(tr("Exit the application"));
+  connect(m_action_exit, SIGNAL(triggered()), this, SLOT(close()));
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //windows
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  m_action_close_all = new QAction(tr("Close &All"), this);
+  m_action_close_all->setStatusTip(tr("Close all the windows"));
+  connect(m_action_close_all, SIGNAL(triggered()), m_mdi_area, SLOT(closeAllSubWindows()));
+
+  m_action_tile = new QAction(tr("&Tile"), this);
+  m_action_tile->setStatusTip(tr("Tile the windows"));
+  connect(m_action_tile, SIGNAL(triggered()), m_mdi_area, SLOT(tileSubWindows()));
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //about
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  m_action_about = new QAction(tr("&About"), this);
+  m_action_about->setStatusTip(tr("Show the application's About box"));
+  connect(m_action_about, SIGNAL(triggered()), this, SLOT(about()));
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //recent files
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  for(int i = 0; i < max_recent_files; ++i)
+  {
+    m_action_recent_file[i] = new QAction(this);
+    m_action_recent_file[i]->setVisible(false);
+    connect(m_action_recent_file[i], SIGNAL(triggered()), this, SLOT(open_recent_file()));
+  }
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //menus
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  m_menu_file = menuBar()->addMenu(tr("&File"));
+  m_menu_file->addAction(m_action_open);
+  m_action_separator_recent = m_menu_file->addSeparator();
+  for(int i = 0; i < max_recent_files; ++i)
+    m_menu_file->addAction(m_action_recent_file[i]);
+  m_menu_file->addSeparator();
+  m_menu_file->addAction(m_action_exit);
+
+  m_menu_windows = menuBar()->addMenu(tr("&Window"));
+  m_menu_windows->addAction(m_action_tile);
+  m_menu_windows->addAction(m_action_close_all);
+
+  m_menu_help = menuBar()->addMenu(tr("&Help"));
+  m_menu_help->addAction(m_action_about);
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //toolbar
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  m_tool_bar = addToolBar(tr("&File"));
+  m_tool_bar->addAction(m_action_open);
+
+  //avoid popup on toolbar
+  setContextMenuPolicy(Qt::NoContextMenu);
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //settings
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  QSettings settings("space", "sqlite_explorer");
+  m_sl_recent_files = settings.value("recentFiles").toStringList();
+  update_recent_file_actions();
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //icons
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  m_icon_main = QIcon(":/images/sample.png");
+  m_icon_group = QIcon(":/images/folder.png");
+  m_icon_dataset = QIcon(":/images/document.png");
+
+  ///////////////////////////////////////////////////////////////////////////////////////
+  //set main window icon
+  ///////////////////////////////////////////////////////////////////////////////////////
+
+  setWindowIcon(m_icon_main);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::about
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void MainWindow::about()
+{
+  QMessageBox::about(this, tr("About SQLite Explorer"), tr("(c) 2015-2016 Pedro Vicente -- Space Research Software LLC\n\n"));
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::closeEvent
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void MainWindow::closeEvent(QCloseEvent *eve)
+{
+  QSettings settings("space", "sqlite_explorer");
+  settings.setValue("recentFiles", m_sl_recent_files);
+  eve->accept();
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//last_component
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+QString last_component(const QString &full_file_name)
+{
+  return QFileInfo(full_file_name).fileName();
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::update_recent_file_actions
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void MainWindow::update_recent_file_actions()
+{
+  QMutableStringListIterator i(m_sl_recent_files);
+  while(i.hasNext())
+  {
+    QString file_name = i.next();
+    if(!QFile::exists(file_name))
+    {
+      i.remove();
+    }
+  }
+
+  for(int j = 0; j < max_recent_files; ++j)
+  {
+    if(j < m_sl_recent_files.count())
+    {
+      QString file_name = last_component(m_sl_recent_files[j]);
+      QString text = tr("&%1 %2")
+        .arg(j + 1)
+        .arg(file_name);
+      m_action_recent_file[j]->setText(text);
+      m_action_recent_file[j]->setData(m_sl_recent_files[j]);
+      m_action_recent_file[j]->setVisible(true);
+    }
+    else
+    {
+      m_action_recent_file[j]->setVisible(false);
+    }
+  }
+  m_action_separator_recent->setVisible(!m_sl_recent_files.isEmpty());
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::set_current_file
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void MainWindow::set_current_file(const QString &file_name)
+{
+  m_str_current_file = file_name;
+
+  QString shownName = tr("Untitled");
+  if(!m_str_current_file.isEmpty())
+  {
+    shownName = last_component(m_str_current_file);
+    m_sl_recent_files.removeAll(m_str_current_file);
+    m_sl_recent_files.prepend(m_str_current_file);
+    update_recent_file_actions();
+  }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::open_file
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void MainWindow::open_file()
+{
+  QString file_name = QFileDialog::getOpenFileName(this,
+    tr("Open File"), ".",
+    tr("SQLite Files (*.sqlite);;All Files (*.*)"));
+
+  if(file_name.isEmpty())
+    return;
+
+  if(this->read_file(file_name) == SQLITE_OK)
+  {
+    this->set_current_file(file_name);
+  }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::open_recent_file
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void MainWindow::open_recent_file()
+{
+  QAction *action = qobject_cast<QAction *>(sender());
+  if(action)
+  {
+    read_file(action->data().toString());
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::read_file
+///////////////////////////////////////////////////////////////////////////////////////
+
+bool MainWindow::is_sqlite(const QString & file_name)
+{
+  // every valid SQLite database file begins with the following 16 bytes (in hex): 53 51 4c 69 74 65 20 66 6f 72 6d 61 74 20 33 00. 
+  // this byte sequence corresponds to the UTF-8 string "SQLite format 3" including the nul terminator character at the end.
+  std::string str(file_name.toStdString());
+  FILE *fp = NULL;
+  char buf[16+1];
+  size_t size_r;
+  fp = fopen(str.c_str(), "rb");
+  if(fp)
+  {
+    if((size_r = fread(buf, 1, 16+1, fp)) != 16+1)
+    {
+      return false;
+    }
+    fclose(fp);
+    if(strcmp(buf, "SQLite format 3") == 0)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::read_file
+///////////////////////////////////////////////////////////////////////////////////////
+
+int MainWindow::read_file(const QString & file_name)
+{
+  if(is_sqlite(file_name))
+  {
+    return read_sqlite(file_name);
+  }
+  return SQLITE_ERROR;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::read_sqlite
+///////////////////////////////////////////////////////////////////////////////////////
+
+int MainWindow::read_sqlite(const QString & file_name)
+{
+  sqlite3 *db = 0;
+  sqlite3_stmt *stmt = 0;
+  QString name;
+  int index;
+  int len;
+
+  if(sqlite3_open_v2(file_name.toUtf8(), &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK)
+  {
+    sqlite3_errmsg(db);
+    sqlite3_close(db);
+    return SQLITE_ERROR;
+  }
+
+  if(sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table'", -1, &stmt, 0) != SQLITE_OK)
+  {
+    sqlite3_errmsg(db);
+    sqlite3_close(db);
+    return SQLITE_ERROR;
+  }
+
+  //add root
+  QTreeWidgetItem *root_item = new QTreeWidgetItem(m_tree);
+  index = file_name.lastIndexOf(QChar('/'));
+  len = file_name.length();
+  name = file_name.right(len - index - 1);
+  root_item->setText(0, name);
+  root_item->setIcon(0, m_icon_group);
+
+  while(sqlite3_step(stmt) == SQLITE_ROW)
+  {
+    QString str_table = QString::fromUtf8((const char*)sqlite3_column_text(stmt, 0));
+
+    //append item
+    QTreeWidgetItem *item_var = new QTreeWidgetItem(root_item);
+    item_var->setText(0, str_table);
+    item_var->setIcon(0, m_icon_dataset);
+  }
+
+  sqlite3_finalize(stmt);
+  sqlite3_close_v2(db);
+  return SQLITE_OK;
+}
+
+
+///////////////////////////////////////////////////////////////////////////////////////
+//TableWidget
+///////////////////////////////////////////////////////////////////////////////////////
+
+class TableWidget : public QTableWidget
+{
+public:
+  TableWidget(QWidget *parent, ItemData *item_data);
+
+protected:
+  void paintEvent(QPaintEvent *eve)
+  {
+    QTableWidget::paintEvent(eve);
+    show_grid();
+  }
+
+private:
+  void show_grid();
+  ItemData *m_item_data; // the tree item that generated this grid 
+  int m_nbr_rows;   // number of rows
+  int m_nbr_cols;   // number of columns
+};
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//ChildWindowTable
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+class ChildWindowTable : public ChildWindow
+{
+public:
+  ChildWindowTable(QWidget *parent, ItemData *item_data) :
+    ChildWindow(parent, item_data)
+  {
+    m_table = new TableWidget(parent, item_data);
+    setCentralWidget(m_table);
+  }
+private:
+  TableWidget *m_table;
+};
+
+
+///////////////////////////////////////////////////////////////////////////////////////
+//MainWindow::add_table
+///////////////////////////////////////////////////////////////////////////////////////
+
+void MainWindow::add_table(ItemData *item_data)
+{
+  ChildWindowTable *window = new ChildWindowTable(this, item_data);
+  m_mdi_area->addSubWindow(window);
+  window->show();
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+//ChildWindow::ChildWindow
+///////////////////////////////////////////////////////////////////////////////////////
+
+ChildWindow::ChildWindow(QWidget *parent, ItemData *) :
+QMainWindow(parent)
+{
+
+
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+//TableWidget::TableWidget
+///////////////////////////////////////////////////////////////////////////////////////
+
+TableWidget::TableWidget(QWidget *parent, ItemData *item_data) :
+QTableWidget(parent),
+m_item_data(item_data)
+{
+
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+//TableWidget::show_grid
+///////////////////////////////////////////////////////////////////////////////////////
+
+void TableWidget::show_grid()
+{
+
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+//FileTreeWidget::FileTreeWidget 
+///////////////////////////////////////////////////////////////////////////////////////
+
+FileTreeWidget::FileTreeWidget(QWidget *parent) : QTreeWidget(parent)
+{
+  setContextMenuPolicy(Qt::CustomContextMenu);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+//FileTreeWidget::~FileTreeWidget
+///////////////////////////////////////////////////////////////////////////////////////
+
+FileTreeWidget::~FileTreeWidget()
+{
+  QTreeWidgetItemIterator it(this);
+  while(*it)
+  {
+    ItemData *item_data = get_item_data(*it);
+    delete item_data;
+    ++it;
+  }
+
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+//FileTreeWidget::show_context_menu
+///////////////////////////////////////////////////////////////////////////////////////
+
+void FileTreeWidget::show_context_menu(const QPoint &)
+{
+
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+//FileTreeWidget::add_grid
+///////////////////////////////////////////////////////////////////////////////////////
+
+void FileTreeWidget::add_grid()
+{
+  QTreeWidgetItem *item = static_cast <QTreeWidgetItem*> (currentItem());
+  this->load_item(item);
+  ItemData *item_data = get_item_data(item);
+  m_main_window->add_table(item_data);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+//FileTreeWidget::load_item
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void FileTreeWidget::load_item(QTreeWidgetItem  *)
+{
+
+}
+

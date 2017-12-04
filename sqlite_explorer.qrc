@@ -1,0 +1,8 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource>
+    <file>images/open.png</file>
+	<file>images/sample.png</file>
+	<file>images/folder.png</file>
+	<file>images/document.png</file>
+</qresource>
+</RCC>
