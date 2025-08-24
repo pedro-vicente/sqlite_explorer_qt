@@ -6,18 +6,13 @@ mkdir -p build/sqlite_explorer
 remote=$(git config --get remote.origin.url)
 echo "remote repository: $remote"
 
-echo "Building SQLite Explorer..."
 pushd build/sqlite_explorer
 
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
-    echo "Configuring for Windows..."
-    cmake ../../ -DCMAKE_BUILD_TYPE=Debug -DCMAKE_POLICY_VERSION_MINIMUM=3.16
+    cmake ../../  -DCMAKE_POLICY_VERSION_MINIMUM=3.16
 elif [[ "$OSTYPE" == "darwin"* ]]; then
-    echo "Configuring for macOS..."
-    cmake ../../ -DCMAKE_BUILD_TYPE=Debug -DCMAKE_POLICY_VERSION_MINIMUM=3.16
+    cmake ../../ -DCMAKE_POLICY_VERSION_MINIMUM=3.16
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    echo "Configuring for Linux..."
-    # Install dependencies on Ubuntu/Debian if needed
     if command -v apt-get &> /dev/null; then
         echo "Checking for required packages..."
         sudo apt-get update
@@ -26,7 +21,7 @@ elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
         sudo apt-get install -y libsqlite3-dev
         sudo apt-get install -y "^libxcb.*" libx11-xcb-dev libglu1-mesa-dev libxrender-dev libxi-dev libgl1-mesa-dev
     fi
-    cmake ../../ -DCMAKE_BUILD_TYPE=Debug -DCMAKE_POLICY_VERSION_MINIMUM=3.16
+    cmake ../../  -DCMAKE_POLICY_VERSION_MINIMUM=3.16
 fi
 
 cmake --build . --config Debug
